@@ -26,6 +26,7 @@ import (
 	"github.com/go-openapi/strfmt"
 	"github.com/grafana/grafana-openapi-client-go/client"
 	"github.com/grafana/incident-go"
+	browserauth "github.com/grafana/mcp-grafana/auth"
 	"github.com/mark3labs/mcp-go/server"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/sync/singleflight"
@@ -50,6 +51,7 @@ const (
 	grafanaURLHeader                 = "X-Grafana-URL"
 	grafanaServiceAccountTokenHeader = "X-Grafana-Service-Account-Token"
 	grafanaAPIKeyHeader              = "X-Grafana-API-Key" // Deprecated: use X-Grafana-Service-Account-Token instead
+	grafanaAuthBrowserEnvVar         = "GRAFANA_AUTH_BROWSER"
 )
 
 func urlAndAPIKeyFromEnv(logger *slog.Logger) (string, string) {
@@ -283,6 +285,10 @@ type GrafanaConfig struct {
 	// to inject their own slog.Logger for consistent structured logging with
 	// per-request context such as tenant_id.
 	Logger *slog.Logger
+	// BrowserAuth enables browser-based session authentication.
+	// When true, the server opens a browser for SSO login and captures the
+	// grafana_session cookie instead of requiring a service account token.
+	BrowserAuth bool
 }
 
 // HTTPTransport returns the base HTTP transport for this config.
@@ -760,6 +766,11 @@ func BuildTransport(cfg *GrafanaConfig, base http.RoundTripper, opts ...Transpor
 		transport = otelhttp.NewTransport(transport)
 	}
 
+	if cfg.BrowserAuth {
+		store := browserauth.NewSessionStore()
+		transport = browserauth.NewSessionAuthTransport(transport, cfg.URL, store)
+	}
+
 	return transport, nil
 }
 
@@ -827,6 +838,12 @@ var ExtractGrafanaInfoFromEnv server.StdioContextFunc = func(ctx context.Context
 	config.BasicAuth = basicAuth
 	config.OrgID = orgID
 	config.ExtraHeaders = extraHeaders
+
+	if browserAuth := os.Getenv(grafanaAuthBrowserEnvVar); strings.EqualFold(browserAuth, "true") || browserAuth == "1" {
+		config.BrowserAuth = true
+		slog.Info("Browser-based authentication enabled via GRAFANA_AUTH_BROWSER")
+	}
+
 	return WithGrafanaConfig(ctx, config)
 }
 
