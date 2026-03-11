@@ -21,6 +21,7 @@ import (
 	"github.com/go-openapi/strfmt"
 	"github.com/grafana/grafana-openapi-client-go/client"
 	"github.com/grafana/incident-go"
+	browserauth "github.com/grafana/mcp-grafana/auth"
 	"github.com/mark3labs/mcp-go/server"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
@@ -38,6 +39,8 @@ const (
 	grafanaPasswordEnvVar = "GRAFANA_PASSWORD"
 
 	grafanaExtraHeadersEnvVar = "GRAFANA_EXTRA_HEADERS"
+
+	grafanaAuthBrowserEnvVar = "GRAFANA_AUTH_BROWSER"
 
 	grafanaURLHeader    = "X-Grafana-URL"
 	grafanaAPIKeyHeader = "X-Grafana-API-Key"
@@ -180,6 +183,11 @@ type GrafanaConfig struct {
 	// MaxLokiLogLimit is the maximum number of log lines that can be returned
 	// from Loki queries.
 	MaxLokiLogLimit int
+
+	// BrowserAuth enables browser-based session authentication.
+	// When true, the server opens a browser for SSO login and captures the
+	// grafana_session cookie instead of requiring a service account token.
+	BrowserAuth bool
 }
 
 const (
@@ -389,6 +397,11 @@ func BuildTransport(cfg *GrafanaConfig, base http.RoundTripper) (http.RoundTripp
 		transport = NewExtraHeadersRoundTripper(transport, cfg.ExtraHeaders)
 	}
 
+	if cfg.BrowserAuth {
+		store := browserauth.NewSessionStore()
+		transport = browserauth.NewSessionAuthTransport(transport, cfg.URL, store)
+	}
+
 	return transport, nil
 }
 
@@ -455,6 +468,12 @@ var ExtractGrafanaInfoFromEnv server.StdioContextFunc = func(ctx context.Context
 	config.BasicAuth = basicAuth
 	config.OrgID = orgID
 	config.ExtraHeaders = extraHeaders
+
+	if browserAuth := os.Getenv(grafanaAuthBrowserEnvVar); strings.EqualFold(browserAuth, "true") || browserAuth == "1" {
+		config.BrowserAuth = true
+		slog.Info("Browser-based authentication enabled via GRAFANA_AUTH_BROWSER")
+	}
+
 	return WithGrafanaConfig(ctx, config)
 }
 
@@ -604,7 +623,12 @@ func NewGrafanaClient(ctx context.Context, grafanaURL, apiKey string, auth *url.
 						rt = NewOrgIDRoundTripper(rt, config.OrgID)
 					}
 					userAgentWrapped := wrapWithUserAgent(rt)
-					wrapped := otelhttp.NewTransport(userAgentWrapped)
+					var wrapped http.RoundTripper = otelhttp.NewTransport(userAgentWrapped)
+					if config.BrowserAuth {
+						store := browserauth.NewSessionStore()
+						wrapped = browserauth.NewSessionAuthTransport(wrapped, grafanaURL, store)
+						slog.Info("Browser-based session auth enabled", "url", grafanaURL)
+					}
 					transportField.Set(reflect.ValueOf(wrapped))
 					slog.Debug("HTTP tracing, user agent tracking, and timeout enabled for Grafana client", "timeout", timeout)
 				}
