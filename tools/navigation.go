@@ -14,6 +14,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/grafana/grafana-openapi-client-go/models"
 	mcpgrafana "github.com/grafana/mcp-grafana"
 )
 
@@ -43,6 +44,64 @@ type DeeplinkProvisioningPreview struct {
 type TimeRange struct {
 	From string `json:"from" jsonschema:"description=Start time (e.g.\\, 'now-1h')"`
 	To   string `json:"to" jsonschema:"description=End time (e.g.\\, 'now')"`
+}
+
+func resolveDatasourceVariable(ctx context.Context, dashboardUID, datasourceUID string, queryParams map[string]string) (map[string]string, error) {
+	c := mcpgrafana.GrafanaClientFromContext(ctx)
+	if c == nil {
+		return queryParams, nil
+	}
+	dashboard, err := c.Dashboards.GetDashboardByUID(dashboardUID)
+	if err != nil {
+		return queryParams, fmt.Errorf("failed to fetch dashboard %s for variable resolution: %w", dashboardUID, err)
+	}
+	varName := findDatasourceVariableName(dashboard.Payload)
+	if varName == "" {
+		return queryParams, nil
+	}
+	varKey := "var-" + varName
+	if _, exists := queryParams[varKey]; exists {
+		return queryParams, nil
+	}
+	ds, err := c.Datasources.GetDataSourceByUID(datasourceUID)
+	if err != nil {
+		return queryParams, fmt.Errorf("failed to look up datasource %s: %w", datasourceUID, err)
+	}
+	if queryParams == nil {
+		queryParams = make(map[string]string)
+	}
+	queryParams[varKey] = ds.Payload.Name
+	return queryParams, nil
+}
+
+func findDatasourceVariableName(dashboard *models.DashboardFullWithMeta) string {
+	if dashboard == nil || dashboard.Dashboard == nil {
+		return ""
+	}
+	db, ok := dashboard.Dashboard.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	templating, ok := db["templating"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	list, ok := templating["list"].([]interface{})
+	if !ok {
+		return ""
+	}
+	for _, item := range list {
+		variable, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if variable["type"] == "datasource" {
+			if name, ok := variable["name"].(string); ok && name != "" {
+				return name
+			}
+		}
+	}
+	return ""
 }
 
 func grafanaBaseURLFromContext(ctx context.Context) (string, error) {
@@ -84,6 +143,12 @@ func generateDeeplinkWithMode(ctx context.Context, args GenerateDeeplinkParams, 
 		if err != nil {
 			return "", err
 		}
+		if args.DashboardUID != nil && args.DatasourceUID != nil {
+			args.QueryParams, err = resolveDatasourceVariable(ctx, *args.DashboardUID, *args.DatasourceUID, args.QueryParams)
+			if err != nil {
+				return "", err
+			}
+		}
 		deeplink = target
 
 	case "panel":
@@ -93,6 +158,12 @@ func generateDeeplinkWithMode(ctx context.Context, args GenerateDeeplinkParams, 
 		}
 		if args.PanelID == nil {
 			return "", fmt.Errorf("panelId is required for panel links")
+		}
+		if args.DashboardUID != nil && args.DatasourceUID != nil {
+			args.QueryParams, err = resolveDatasourceVariable(ctx, *args.DashboardUID, *args.DatasourceUID, args.QueryParams)
+			if err != nil {
+				return "", err
+			}
 		}
 		separator := "?"
 		if strings.Contains(target, "?") {

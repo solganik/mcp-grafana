@@ -35,6 +35,15 @@ func newShortenTestContext(apiURL, publicURL, apiKey string) context.Context {
 	return mcpgrafana.WithGrafanaClient(ctx, &mcpgrafana.GrafanaClient{PublicURL: publicURL})
 }
 
+func extractLeftParam(t *testing.T, rawURL string) string {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	require.NoError(t, err)
+	leftValues := u.Query()["left"]
+	require.Len(t, leftValues, 1, "expected exactly one 'left' param")
+	return leftValues[0]
+}
+
 func TestGenerateDeeplink(t *testing.T) {
 	grafanaCfg := mcpgrafana.GrafanaConfig{
 		URL: "http://localhost:3000",
