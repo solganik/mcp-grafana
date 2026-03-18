@@ -148,6 +148,44 @@ func findDatasourceVariableName(dashboard *models.DashboardFullWithMeta) string 
 	return ""
 }
 
+func getElasticsearchTimeField(ctx context.Context, datasourceUID string) string {
+	ds, err := getDatasourceByUID(ctx, GetDatasourceByUIDParams{UID: datasourceUID})
+	if err != nil || ds == nil || ds.Type != "elasticsearch" {
+		return ""
+	}
+	data, ok := ds.JSONData.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	timeField, _ := data["timeField"].(string)
+	return timeField
+}
+
+func applyElasticsearchTimeField(queries []map[string]interface{}, datasourceTimeField string) {
+	if datasourceTimeField == "" {
+		return
+	}
+	for _, query := range queries {
+		target := query
+		if extra, ok := query["extraJSON"].(map[string]interface{}); ok {
+			target = extra
+		}
+		if _, ok := target["timeField"]; !ok {
+			target["timeField"] = datasourceTimeField
+		}
+		aggregations, ok := target["bucketAggs"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, item := range aggregations {
+			aggregation, ok := item.(map[string]interface{})
+			if ok && aggregation["type"] == "date_histogram" {
+				aggregation["field"] = datasourceTimeField
+			}
+		}
+	}
+}
+
 func resolveDatasourceVariable(ctx context.Context, dashboardUID, datasourceUID string, queryParams map[string]string) (map[string]string, error) {
 	c := mcpgrafana.GrafanaClientFromContext(ctx)
 	if c == nil {
@@ -278,7 +316,11 @@ func generateDeeplinkWithMode(ctx context.Context, args GenerateDeeplinkParams, 
 			return "", fmt.Errorf("datasourceUid is required for explore links")
 		}
 
-		leftJSON, err := buildExploreLeftParam(*args.DatasourceUID, args.Queries, args.TimeRange)
+		queries := args.Queries
+		if datasourceTimeField := getElasticsearchTimeField(ctx, *args.DatasourceUID); datasourceTimeField != "" {
+			applyElasticsearchTimeField(queries, datasourceTimeField)
+		}
+		leftJSON, err := buildExploreLeftParam(*args.DatasourceUID, queries, args.TimeRange)
 		if err != nil {
 			return "", fmt.Errorf("failed to build explore state: %w", err)
 		}
