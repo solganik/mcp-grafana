@@ -46,6 +46,108 @@ type TimeRange struct {
 	To   string `json:"to" jsonschema:"description=End time (e.g.\\, 'now')"`
 }
 
+func buildExploreLeftParam(datasourceUID string, queries []map[string]interface{}, timeRange *TimeRange) (string, error) {
+	queryList := make([]map[string]interface{}, 0, len(queries))
+	for i, query := range queries {
+		qm := make(map[string]interface{}, len(query)+2)
+		for key, value := range query {
+			if key != "extraJSON" {
+				qm[key] = value
+			}
+		}
+		if extra, ok := query["extraJSON"].(map[string]interface{}); ok {
+			for key, value := range extra {
+				qm[key] = value
+			}
+		}
+		if _, ok := qm["datasource"]; !ok {
+			qm["datasource"] = map[string]string{"uid": datasourceUID}
+		}
+		if _, ok := qm["refId"]; !ok {
+			qm["refId"] = string(rune('A' + i))
+		}
+		if expr, ok := qm["expr"].(string); ok && expr != "" {
+			qm["editorMode"] = "code"
+			if _, exists := qm["range"]; !exists {
+				qm["range"] = true
+			}
+		}
+		queryList = append(queryList, qm)
+	}
+	if len(queryList) == 0 {
+		queryList = append(queryList, map[string]interface{}{
+			"refId": "A", "datasource": map[string]string{"uid": datasourceUID},
+		})
+	}
+	leftObj := map[string]interface{}{"datasource": datasourceUID, "queries": queryList}
+	if timeRange != nil {
+		leftObj["range"] = map[string]string{
+			"from": toGrafanaTimeParam(timeRange.From),
+			"to":   toGrafanaTimeParam(timeRange.To),
+		}
+	}
+	data, err := json.Marshal(leftObj)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func resolveDatasourceVariable(ctx context.Context, dashboardUID, datasourceUID string, queryParams map[string]string) (map[string]string, error) {
+	c := mcpgrafana.GrafanaClientFromContext(ctx)
+	if c == nil {
+		return queryParams, nil
+	}
+	dashboard, err := c.Dashboards.GetDashboardByUID(dashboardUID)
+	if err != nil {
+		return queryParams, fmt.Errorf("failed to fetch dashboard %s for variable resolution: %w", dashboardUID, err)
+	}
+	varName := findDatasourceVariableName(dashboard.Payload)
+	if varName == "" {
+		return queryParams, nil
+	}
+	varKey := "var-" + varName
+	if _, exists := queryParams[varKey]; exists {
+		return queryParams, nil
+	}
+	ds, err := c.Datasources.GetDataSourceByUID(datasourceUID)
+	if err != nil {
+		return queryParams, fmt.Errorf("failed to look up datasource %s: %w", datasourceUID, err)
+	}
+	if queryParams == nil {
+		queryParams = make(map[string]string)
+	}
+	queryParams[varKey] = ds.Payload.Name
+	return queryParams, nil
+}
+
+func findDatasourceVariableName(dashboard *models.DashboardFullWithMeta) string {
+	if dashboard == nil || dashboard.Dashboard == nil {
+		return ""
+	}
+	db, ok := dashboard.Dashboard.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	templating, ok := db["templating"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	list, ok := templating["list"].([]interface{})
+	if !ok {
+		return ""
+	}
+	for _, item := range list {
+		variable, ok := item.(map[string]interface{})
+		if ok && variable["type"] == "datasource" {
+			if name, ok := variable["name"].(string); ok && name != "" {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
 func resolveDatasourceVariable(ctx context.Context, dashboardUID, datasourceUID string, queryParams map[string]string) (map[string]string, error) {
 	c := mcpgrafana.GrafanaClientFromContext(ctx)
 	if c == nil {
@@ -176,30 +278,9 @@ func generateDeeplinkWithMode(ctx context.Context, args GenerateDeeplinkParams, 
 			return "", fmt.Errorf("datasourceUid is required for explore links")
 		}
 
-		// Build the full explore state inside `left` — Grafana Explore reads
-		// datasource, queries, and range all from this single JSON object.
-		exploreState := map[string]interface{}{
-			"datasource": *args.DatasourceUID,
-		}
-		if len(args.Queries) > 0 {
-			exploreState["queries"] = args.Queries
-		}
-		if args.TimeRange != nil {
-			rangeObj := map[string]string{}
-			if args.TimeRange.From != "" {
-				rangeObj["from"] = toGrafanaTimeParam(args.TimeRange.From)
-			}
-			if args.TimeRange.To != "" {
-				rangeObj["to"] = toGrafanaTimeParam(args.TimeRange.To)
-			}
-			if len(rangeObj) > 0 {
-				exploreState["range"] = rangeObj
-			}
-		}
-
-		leftJSON, err := json.Marshal(exploreState)
+		leftJSON, err := buildExploreLeftParam(*args.DatasourceUID, args.Queries, args.TimeRange)
 		if err != nil {
-			return "", fmt.Errorf("failed to marshal explore state: %w", err)
+			return "", fmt.Errorf("failed to build explore state: %w", err)
 		}
 
 		params := url.Values{}
