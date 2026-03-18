@@ -37,6 +37,69 @@ type TimeRange struct {
 	To   string `json:"to" jsonschema:"description=End time. Use relative (e.g. 'now') or epoch milliseconds (e.g. '1773723000000'). ISO timestamps are not supported by Grafana."`
 }
 
+// getElasticsearchTimeField fetches the configured timeField from an Elasticsearch
+// datasource's settings. Returns empty string for non-Elasticsearch datasources
+// or if the timeField is not configured.
+func getElasticsearchTimeField(ctx context.Context, datasourceUID string) string {
+	ds, err := getDatasourceByUID(ctx, GetDatasourceByUIDParams{UID: datasourceUID})
+	if err != nil || ds == nil {
+		return ""
+	}
+	if ds.Type != "elasticsearch" {
+		return ""
+	}
+	if ds.JSONData == nil {
+		return ""
+	}
+	jsonDataMap, ok := ds.JSONData.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	if tf, ok := jsonDataMap["timeField"].(string); ok {
+		return tf
+	}
+	return ""
+}
+
+// applyElasticsearchTimeField ensures that Elasticsearch/Coralogix explore queries
+// use the correct timeField from the datasource configuration. If the caller provided
+// bucketAggs with a date_histogram but used a wrong field (e.g. "@timestamp"), this
+// replaces it with the datasource's configured timeField.
+func applyElasticsearchTimeField(queries []ExploreQuery, dsTimeField string) {
+	if dsTimeField == "" {
+		return
+	}
+	for i, q := range queries {
+		if len(q.ExtraJSON) == 0 {
+			continue
+		}
+		// Auto-set top-level timeField if not provided
+		if _, exists := q.ExtraJSON["timeField"]; !exists {
+			queries[i].ExtraJSON["timeField"] = dsTimeField
+		}
+		// Fix bucketAggs date_histogram field
+		bucketAggs, ok := q.ExtraJSON["bucketAggs"]
+		if !ok {
+			continue
+		}
+		aggsList, ok := bucketAggs.([]interface{})
+		if !ok {
+			continue
+		}
+		for _, agg := range aggsList {
+			aggMap, ok := agg.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if aggMap["type"] == "date_histogram" {
+				if field, ok := aggMap["field"].(string); ok && field != dsTimeField {
+					aggMap["field"] = dsTimeField
+				}
+			}
+		}
+	}
+}
+
 // buildExploreLeftParam constructs the JSON value for the `left` URL parameter
 // used by Grafana Explore. The `left` param must contain the datasource, queries,
 // and time range as a single JSON object.
@@ -241,6 +304,10 @@ func generateDeeplink(ctx context.Context, args GenerateDeeplinkParams) (string,
 	case "explore":
 		if args.DatasourceUID == nil {
 			return "", fmt.Errorf("datasourceUid is required for explore links")
+		}
+		// For Elasticsearch datasources, auto-fix timeField in queries
+		if dsTimeField := getElasticsearchTimeField(ctx, *args.DatasourceUID); dsTimeField != "" {
+			applyElasticsearchTimeField(args.Queries, dsTimeField)
 		}
 		leftState, err := buildExploreLeftParam(*args.DatasourceUID, args.Queries, args.TimeRange)
 		if err != nil {

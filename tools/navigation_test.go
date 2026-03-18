@@ -454,3 +454,118 @@ func TestFindDatasourceVariableName(t *testing.T) {
 		assert.Nil(t, result)
 	})
 }
+
+func TestApplyElasticsearchTimeField(t *testing.T) {
+	t.Run("fixes wrong date_histogram field", func(t *testing.T) {
+		queries := []ExploreQuery{
+			{
+				RefID: "A",
+				ExtraJSON: map[string]interface{}{
+					"query": "jfrogrepo21",
+					"bucketAggs": []interface{}{
+						map[string]interface{}{
+							"type":  "date_histogram",
+							"field": "@timestamp",
+							"id":    "2",
+						},
+					},
+				},
+			},
+		}
+		applyElasticsearchTimeField(queries, "coralogix.timestamp")
+
+		// bucketAggs field should be corrected
+		aggs := queries[0].ExtraJSON["bucketAggs"].([]interface{})
+		agg := aggs[0].(map[string]interface{})
+		assert.Equal(t, "coralogix.timestamp", agg["field"])
+
+		// timeField should be auto-set
+		assert.Equal(t, "coralogix.timestamp", queries[0].ExtraJSON["timeField"])
+	})
+
+	t.Run("preserves correct field", func(t *testing.T) {
+		queries := []ExploreQuery{
+			{
+				RefID: "A",
+				ExtraJSON: map[string]interface{}{
+					"query":     "test",
+					"timeField": "coralogix.timestamp",
+					"bucketAggs": []interface{}{
+						map[string]interface{}{
+							"type":  "date_histogram",
+							"field": "coralogix.timestamp",
+							"id":    "2",
+						},
+					},
+				},
+			},
+		}
+		applyElasticsearchTimeField(queries, "coralogix.timestamp")
+
+		aggs := queries[0].ExtraJSON["bucketAggs"].([]interface{})
+		agg := aggs[0].(map[string]interface{})
+		assert.Equal(t, "coralogix.timestamp", agg["field"])
+	})
+
+	t.Run("does not touch non-date_histogram aggs", func(t *testing.T) {
+		queries := []ExploreQuery{
+			{
+				RefID: "A",
+				ExtraJSON: map[string]interface{}{
+					"query": "test",
+					"bucketAggs": []interface{}{
+						map[string]interface{}{
+							"type":  "terms",
+							"field": "customer_name.keyword",
+							"id":    "3",
+						},
+						map[string]interface{}{
+							"type":  "date_histogram",
+							"field": "@timestamp",
+							"id":    "2",
+						},
+					},
+				},
+			},
+		}
+		applyElasticsearchTimeField(queries, "coralogix.timestamp")
+
+		aggs := queries[0].ExtraJSON["bucketAggs"].([]interface{})
+		termsAgg := aggs[0].(map[string]interface{})
+		assert.Equal(t, "customer_name.keyword", termsAgg["field"])
+		dateAgg := aggs[1].(map[string]interface{})
+		assert.Equal(t, "coralogix.timestamp", dateAgg["field"])
+	})
+
+	t.Run("no-op with empty timeField", func(t *testing.T) {
+		queries := []ExploreQuery{
+			{
+				RefID: "A",
+				ExtraJSON: map[string]interface{}{
+					"query": "test",
+					"bucketAggs": []interface{}{
+						map[string]interface{}{
+							"type":  "date_histogram",
+							"field": "@timestamp",
+							"id":    "2",
+						},
+					},
+				},
+			},
+		}
+		applyElasticsearchTimeField(queries, "")
+
+		aggs := queries[0].ExtraJSON["bucketAggs"].([]interface{})
+		agg := aggs[0].(map[string]interface{})
+		assert.Equal(t, "@timestamp", agg["field"])
+	})
+
+	t.Run("no-op with nil ExtraJSON", func(t *testing.T) {
+		queries := []ExploreQuery{
+			{RefID: "A", Expr: "up"},
+		}
+		applyElasticsearchTimeField(queries, "coralogix.timestamp")
+		// Should not panic or modify anything
+		assert.Empty(t, queries[0].ExtraJSON)
+	})
+}
