@@ -7,7 +7,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/chromedp/cdproto/network"
@@ -67,6 +69,7 @@ func tryBrowserLogin(loginURL, domain, profileDir string) (string, error) {
 		if err := os.MkdirAll(profileDir, 0o700); err != nil {
 			return "", fmt.Errorf("create chrome profile dir: %w", err)
 		}
+		removeStaleChromeLock(profileDir)
 		opts = append(opts, chromedp.UserDataDir(profileDir))
 		slog.Info("Starting browser login", "url", loginURL, "profile", profileDir)
 	} else {
@@ -128,6 +131,31 @@ func tryBrowserLogin(loginURL, domain, profileDir string) (string, error) {
 
 func chromeProfileDir() string {
 	return filepath.Join(configDir(), "chrome-profile")
+}
+
+// removeStaleChromeLock removes a SingletonLock left behind by a previous
+// Chrome process that didn't shut down cleanly. Without this, Chrome refuses
+// to open a visible window with the profile, causing silent login failures.
+func removeStaleChromeLock(profileDir string) {
+	lockPath := filepath.Join(profileDir, "SingletonLock")
+	target, err := os.Readlink(lockPath)
+	if err != nil {
+		return // no lock or not a symlink — nothing to do
+	}
+	// SingletonLock is a symlink to "hostname-pid". Check if the PID is still alive.
+	if idx := strings.LastIndex(target, "-"); idx >= 0 {
+		if pid, err := strconv.Atoi(target[idx+1:]); err == nil {
+			if proc, err := os.FindProcess(pid); err == nil && proc.Signal(syscall.Signal(0)) == nil {
+				slog.Debug("Chrome profile lock held by live process, not removing", "pid", pid)
+				return
+			}
+		}
+	}
+	if err := os.Remove(lockPath); err != nil {
+		slog.Warn("Failed to remove stale Chrome SingletonLock", "path", lockPath, "error", err)
+		return
+	}
+	slog.Info("Removed stale Chrome SingletonLock", "path", lockPath, "target", target)
 }
 
 // matchesDomain checks if a cookie domain matches the target domain.
