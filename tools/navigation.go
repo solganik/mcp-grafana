@@ -186,64 +186,6 @@ func applyElasticsearchTimeField(queries []map[string]interface{}, datasourceTim
 	}
 }
 
-func resolveDatasourceVariable(ctx context.Context, dashboardUID, datasourceUID string, queryParams map[string]string) (map[string]string, error) {
-	c := mcpgrafana.GrafanaClientFromContext(ctx)
-	if c == nil {
-		return queryParams, nil
-	}
-	dashboard, err := c.Dashboards.GetDashboardByUID(dashboardUID)
-	if err != nil {
-		return queryParams, fmt.Errorf("failed to fetch dashboard %s for variable resolution: %w", dashboardUID, err)
-	}
-	varName := findDatasourceVariableName(dashboard.Payload)
-	if varName == "" {
-		return queryParams, nil
-	}
-	varKey := "var-" + varName
-	if _, exists := queryParams[varKey]; exists {
-		return queryParams, nil
-	}
-	ds, err := c.Datasources.GetDataSourceByUID(datasourceUID)
-	if err != nil {
-		return queryParams, fmt.Errorf("failed to look up datasource %s: %w", datasourceUID, err)
-	}
-	if queryParams == nil {
-		queryParams = make(map[string]string)
-	}
-	queryParams[varKey] = ds.Payload.Name
-	return queryParams, nil
-}
-
-func findDatasourceVariableName(dashboard *models.DashboardFullWithMeta) string {
-	if dashboard == nil || dashboard.Dashboard == nil {
-		return ""
-	}
-	db, ok := dashboard.Dashboard.(map[string]interface{})
-	if !ok {
-		return ""
-	}
-	templating, ok := db["templating"].(map[string]interface{})
-	if !ok {
-		return ""
-	}
-	list, ok := templating["list"].([]interface{})
-	if !ok {
-		return ""
-	}
-	for _, item := range list {
-		variable, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if variable["type"] == "datasource" {
-			if name, ok := variable["name"].(string); ok && name != "" {
-				return name
-			}
-		}
-	}
-	return ""
-}
-
 func grafanaBaseURLFromContext(ctx context.Context) (string, error) {
 	// Prefer the public URL from the Grafana client (fetched from /api/frontend/settings),
 	// falling back to the configured URL if the client is not available or has no public URL.

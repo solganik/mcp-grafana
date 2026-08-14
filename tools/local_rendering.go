@@ -328,4 +328,6 @@ var RenderPanelImageLocal = mcpgrafana.MustTool(
 	mcp.WithTitleAnnotation("Render panel image (local browser)"),
 	mcp.WithIdempotentHintAnnotation(true),
 	mcp.WithReadOnlyHintAnnotation(true),
+	mcp.WithDestructiveHintAnnotation(false),
+	mcp.WithOpenWorldHintAnnotation(false),
 )

@@ -463,4 +463,6 @@ var RenderExploreImage = mcpgrafana.MustTool(
 	mcp.WithTitleAnnotation("Render Explore image (local browser)"),
 	mcp.WithIdempotentHintAnnotation(true),
 	mcp.WithReadOnlyHintAnnotation(true),
+	mcp.WithDestructiveHintAnnotation(false),
+	mcp.WithOpenWorldHintAnnotation(false),
 )
