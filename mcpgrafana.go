@@ -776,6 +776,11 @@ func BuildTransport(cfg *GrafanaConfig, base http.RoundTripper, opts ...Transpor
 		transport = browserauth.NewSessionAuthTransport(transport, cfg.URL, store)
 	}
 
+	if cfg.BrowserAuth {
+		store := browserauth.NewSessionStore()
+		transport = browserauth.NewSessionAuthTransport(transport, cfg.URL, store)
+	}
+
 	return transport, nil
 }
 
