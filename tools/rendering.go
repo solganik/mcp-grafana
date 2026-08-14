@@ -368,4 +368,5 @@ var GetPanelImage = mcpgrafana.MustTool(
 func AddRenderingTools(mcp *server.MCPServer) {
 	GetPanelImage.Register(mcp)
 	RenderPanelImageLocal.Register(mcp)
+	RenderExploreImage.Register(mcp)
 }

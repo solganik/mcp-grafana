@@ -52,6 +52,7 @@ const (
 	grafanaServiceAccountTokenHeader = "X-Grafana-Service-Account-Token"
 	grafanaAPIKeyHeader              = "X-Grafana-API-Key" // Deprecated: use X-Grafana-Service-Account-Token instead
 	grafanaAuthBrowserEnvVar         = "GRAFANA_AUTH_BROWSER"
+	grafanaArtifactRootEnvVar        = "GRAFANA_ARTIFACT_OUTPUT_ROOT"
 )
 
 func urlAndAPIKeyFromEnv(logger *slog.Logger) (string, string) {
@@ -269,6 +270,10 @@ type GrafanaConfig struct {
 	// MaxLokiLogLimit is the maximum number of log lines that can be returned
 	// from Loki queries.
 	MaxLokiLogLimit int
+
+	// ArtifactOutputRoot restricts paths written by local rendering tools.
+	// An empty value disables artifact-writing tools until configured.
+	ArtifactOutputRoot string
 
 	// BaseTransport is an optional base HTTP transport used as the innermost
 	// layer of the middleware chain in NewGrafanaClient. When set, it replaces
@@ -843,6 +848,9 @@ var ExtractGrafanaInfoFromEnv server.StdioContextFunc = func(ctx context.Context
 		config.BrowserAuth = true
 		slog.Info("Browser-based authentication enabled via GRAFANA_AUTH_BROWSER")
 	}
+	if artifactRoot := os.Getenv(grafanaArtifactRootEnvVar); artifactRoot != "" {
+		config.ArtifactOutputRoot = artifactRoot
+	}
 
 	return WithGrafanaConfig(ctx, config)
 }
@@ -869,6 +877,9 @@ var ExtractGrafanaInfoFromHeaders httpContextFunc = func(ctx context.Context, re
 	config.OrgID = orgID
 
 	config.ExtraHeaders = mergeHeaders(extraHeadersFromEnv(logger), forwardedHeadersFromRequest(req))
+	if artifactRoot := os.Getenv(grafanaArtifactRootEnvVar); artifactRoot != "" {
+		config.ArtifactOutputRoot = artifactRoot
+	}
 	return WithGrafanaConfig(ctx, config)
 }
 

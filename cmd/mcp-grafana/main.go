@@ -91,7 +91,7 @@ var categoryDescription = map[string]string{
 	"pyroscope":     "Pyroscope: Profile applications and fetch profiling data.",
 	"navigation":    "Navigation: Generate deeplink URLs for Grafana resources like dashboards, panels, and Explore queries, with optional built-in shortening.",
 	"annotations":   "Annotations: Create and manage dashboard annotations.",
-	"rendering":     "Rendering: Export dashboard panels or full dashboards as PNG images (requires Grafana Image Renderer plugin).",
+	"rendering":     "Rendering: Export dashboard panels or full dashboards as PNG images, or capture Explore queries with local headless Chrome.",
 	"snapshot":      "Snapshots: List, get, create, and delete dashboard snapshots.",
 	"plugin":        "Plugins: Check whether Grafana plugins are installed and fetch plugin details.",
 	"cloudwatch":    "CloudWatch: Query AWS CloudWatch datasources for metrics and logs.",
@@ -128,6 +128,8 @@ type grafanaConfig struct {
 
 	// BrowserAuth enables browser-based SSO login instead of token auth.
 	browserAuth bool
+	// artifactOutputRoot restricts paths written by local rendering tools.
+	artifactOutputRoot string
 
 	// TLS configuration
 	tlsCertFile   string
@@ -187,6 +189,7 @@ func (dt *disabledTools) addFlags() {
 func (gc *grafanaConfig) addFlags() {
 	flag.BoolVar(&gc.debug, "debug", false, "Enable debug mode for the Grafana transport")
 	flag.BoolVar(&gc.browserAuth, "browser-auth", false, "Enable browser-based SSO authentication (opens browser to capture session cookie)")
+	flag.StringVar(&gc.artifactOutputRoot, "artifact-output-root", "", "Allow local rendering tools to write artifacts only below this directory")
 
 	// TLS configuration flags
 	flag.StringVar(&gc.tlsCertFile, "tls-cert-file", "", "Path to TLS certificate file for client authentication")
@@ -831,6 +834,7 @@ func main() {
 		IncludeArgumentsInSpans: gc.includeArgsInSpans,
 		Timeout:                 gc.timeout,
 		BrowserAuth:             gc.browserAuth,
+		ArtifactOutputRoot:      gc.artifactOutputRoot,
 	}
 	if gc.tlsCertFile != "" || gc.tlsKeyFile != "" || gc.tlsCAFile != "" || gc.tlsSkipVerify {
 		grafanaConfig.TLSConfig = &mcpgrafana.TLSConfig{

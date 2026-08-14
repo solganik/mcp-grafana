@@ -469,6 +469,9 @@ type GetDatasourceByUIDParams struct {
 
 func getDatasourceByUID(ctx context.Context, args GetDatasourceByUIDParams) (*models.DataSource, error) {
 	c := mcpgrafana.GrafanaClientFromContext(ctx)
+	if c == nil {
+		return nil, fmt.Errorf("Grafana client is not configured")
+	}
 	datasource, err := c.Datasources.GetDataSourceByUIDWithParams(
 		datasources.NewGetDataSourceByUIDParamsWithContext(ctx).WithUID(args.UID),
 	)
