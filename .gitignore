@@ -3,6 +3,7 @@ __pycache__/
 *.py[oc]
 build/
 dist/
+!ui/*/dist/
 wheels/
 *.egg-info
 .DS_Store
@@ -10,6 +11,15 @@ wheels/
 .env
 .cursor/
 
+# UI app build artifacts
+ui/*/node_modules/
+
 # Virtual environments
 .venv
 .envrc
+
+# Git worktrees
+.worktrees/
+
+# Superpowers agent artifacts (implementation plans, etc.)
+docs/superpowers/

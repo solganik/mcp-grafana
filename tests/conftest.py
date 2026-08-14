@@ -72,7 +72,6 @@ def grafana_env():
 @pytest.fixture
 def grafana_headers():
     headers = {
-        "X-Grafana-URL": os.environ.get("GRAFANA_URL", DEFAULT_GRAFANA_URL),
     }
     # Check for the new service account token environment variable first
     if key := os.environ.get("GRAFANA_SERVICE_ACCOUNT_TOKEN"):
@@ -98,7 +97,7 @@ def grafana_headers():
 @pytest.fixture
 async def mcp_client(mcp_transport, mcp_url, grafana_env, grafana_headers):
     if mcp_transport == "stdio":
-        enabled_tools = "search,datasource,incident,prometheus,loki,elasticsearch,alerting,dashboard,folder,oncall,asserts,sift,pyroscope,navigation,proxied,annotations,rendering,admin,clickhouse,cloudwatch"
+        enabled_tools = "search,datasource,incident,prometheus,loki,elasticsearch,influxdb,alerting,dashboard,folder,oncall,asserts,sift,pyroscope,navigation,proxied,annotations,rendering,admin,clickhouse,cloudwatch"
         params = StdioServerParameters(
             command=os.environ.get("MCP_GRAFANA_PATH", "../dist/mcp-grafana"),
             args=["--debug", "--log-level", "debug", "--enabled-tools", enabled_tools],

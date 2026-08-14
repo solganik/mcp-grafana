@@ -29,6 +29,8 @@ const (
 	defaultRenderTimeout = 60 * time.Second
 )
 
+var sessionLoadMu sync.Mutex
+
 type RenderPanelLocalParams struct {
 	DashboardUID  string            `json:"dashboardUid" jsonschema:"required,description=The UID of the dashboard to render"`
 	PanelID       *int              `json:"panelId,omitempty" jsonschema:"description=The ID of the panel to render. If omitted\\, the entire dashboard is rendered"`
@@ -117,6 +119,9 @@ func renderPanelImageLocal(ctx context.Context, args RenderPanelLocalParams) (*m
 // loadSessionCookie loads the grafana_session cookie from the session store,
 // triggering a browser login if needed and browser auth is enabled.
 func loadSessionCookie(grafanaURL string, browserAuthEnabled bool) (string, error) {
+	sessionLoadMu.Lock()
+	defer sessionLoadMu.Unlock()
+
 	store := auth.NewSessionStore()
 	cookie := store.Load(grafanaURL)
 	if cookie != "" {
@@ -196,6 +201,9 @@ func renderWithChrome(ctx context.Context, targetURL, cookie, domain string, wid
 // renderWithChromeActions runs a browser render with caller-provided readiness
 // and capture actions. Each invocation owns its allocator and browser context.
 func renderWithChromeActions(ctx context.Context, targetURL, cookie, domain string, width, height, scale int, timeout time.Duration, actions ...chromedp.Action) ([]byte, error) {
+	browserRenderMu.Lock()
+	defer browserRenderMu.Unlock()
+
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", true),
 		chromedp.Flag("disable-gpu", true),
@@ -328,4 +336,6 @@ var RenderPanelImageLocal = mcpgrafana.MustTool(
 	mcp.WithTitleAnnotation("Render panel image (local browser)"),
 	mcp.WithIdempotentHintAnnotation(true),
 	mcp.WithReadOnlyHintAnnotation(true),
+	mcp.WithDestructiveHintAnnotation(false),
+	mcp.WithOpenWorldHintAnnotation(false),
 )
