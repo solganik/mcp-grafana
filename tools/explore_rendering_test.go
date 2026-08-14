@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/mark3labs/mcp-go/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -37,16 +38,43 @@ func TestBuildExploreRenderURL(t *testing.T) {
 	assert.Equal(t, "1", parsed.Query().Get("schemaVersion"))
 	assert.Equal(t, "light", parsed.Query().Get("theme"))
 	assert.Equal(t, "prod/eu", parsed.Query().Get("var-namespace"))
+	var left explorePane
+	require.NoError(t, json.Unmarshal([]byte(parsed.Query().Get("left")), &left))
+	assert.Equal(t, "metrics uid", left.Datasource)
+	require.Len(t, left.Queries, 2)
 
 	var panes map[string]explorePane
 	require.NoError(t, json.Unmarshal([]byte(parsed.Query().Get("panes")), &panes))
-	require.Contains(t, panes, "0")
-	assert.Equal(t, map[string]string{"type": "prometheus", "uid": "metrics uid"}, panes["0"].Datasource)
-	require.Len(t, panes["0"].Queries, 2)
-	assert.Equal(t, "A", panes["0"].Queries[0]["refId"])
-	assert.Equal(t, "Z", panes["0"].Queries[1]["refId"])
-	assert.Equal(t, "rate(http_requests_total[5m])", panes["0"].Queries[0]["expr"])
-	assert.Equal(t, "now-1h", panes["0"].Range.From)
+	require.Contains(t, panes, "abc")
+	assert.Equal(t, "metrics uid", panes["abc"].Datasource)
+	require.Len(t, panes["abc"].Queries, 2)
+	assert.Equal(t, "A", panes["abc"].Queries[0]["refId"])
+	assert.Equal(t, "Z", panes["abc"].Queries[1]["refId"])
+	assert.Equal(t, "rate(http_requests_total[5m])", panes["abc"].Queries[0]["expr"])
+	assert.Equal(t, map[string]any{"type": "prometheus", "uid": "metrics uid"}, panes["abc"].Queries[0]["datasource"])
+	assert.Equal(t, "code", panes["abc"].Queries[0]["editorMode"])
+	assert.Equal(t, "now-1h", panes["abc"].Range.From)
+}
+
+func TestBuildExploreRenderURLPreservesDatasourceSpecificModels(t *testing.T) {
+	args := ExploreRenderParams{
+		DatasourceUID: "logs",
+		Queries: []ExploreRenderQuery{
+			{Model: map[string]any{"expr": "{app=\"grafana\"}", "editorMode": "builder"}},
+			{Model: map[string]any{"query": "SELECT 1"}},
+		},
+		TimeRange: RenderTimeRange{From: "now-1h", To: "now"},
+	}
+
+	result, err := buildExploreRenderURL("http://grafana.example", 1, "loki", args)
+	require.NoError(t, err)
+	parsed, err := url.Parse(result)
+	require.NoError(t, err)
+	var panes map[string]explorePane
+	require.NoError(t, json.Unmarshal([]byte(parsed.Query().Get("panes")), &panes))
+	assert.Equal(t, "builder", panes["abc"].Queries[0]["editorMode"])
+	assert.NotContains(t, panes["abc"].Queries[1], "editorMode")
+	assert.Equal(t, "SELECT 1", panes["abc"].Queries[1]["query"])
 }
 
 func TestValidateArtifactPath(t *testing.T) {
@@ -105,4 +133,55 @@ func TestValidateExploreRenderParams(t *testing.T) {
 	_, err = validateExploreRenderParams(args)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "width")
+}
+
+func TestRenderExploreImageRegistrationSchema(t *testing.T) {
+	srv := server.NewMCPServer("test", "1")
+	AddRenderingTools(srv)
+
+	registered, ok := srv.ListTools()["render_explore_image"]
+	require.True(t, ok)
+	require.NotNil(t, registered)
+	assert.Contains(t, registered.Tool.Description, "headless Chrome")
+	schema := registered.Tool.RawInputSchema
+	for _, name := range []string{"datasourceUid", "queries", "timeRange", "outputPath"} {
+		assert.Contains(t, string(schema), name)
+	}
+}
+
+func TestValidateExploreRenderParamsRejectsReservedVariables(t *testing.T) {
+	args := ExploreRenderParams{
+		DatasourceUID: "prom",
+		Queries:       []ExploreRenderQuery{{Model: map[string]any{"expr": "up"}}},
+		TimeRange:     RenderTimeRange{From: "now-1h", To: "now"},
+		OutputPath:    "/tmp/chart.png",
+		Variables:     map[string]string{"panes": "attacker-controlled"},
+	}
+	_, err := validateExploreRenderParams(args)
+	require.ErrorContains(t, err, "reserved")
+}
+
+func TestNormalizeExploreClipConvertsAndClampsDocumentCoordinates(t *testing.T) {
+	clip, ok := normalizeExploreClip(exploreClipMeasurement{
+		Clip:           exploreClip{X: 110, Y: 260, Width: 1200, Height: 500},
+		DocumentWidth:  1000,
+		DocumentHeight: 600,
+		Reliable:       true,
+	})
+	require.True(t, ok)
+	assert.Equal(t, exploreClip{X: 110, Y: 260, Width: 890, Height: 340}, clip)
+}
+
+func TestNormalizeExploreClipRejectsUnreliableMeasurement(t *testing.T) {
+	_, ok := normalizeExploreClip(exploreClipMeasurement{
+		Clip:          exploreClip{X: 10, Y: 10, Width: 800, Height: 400},
+		DocumentWidth: 1000, DocumentHeight: 600,
+	})
+	assert.False(t, ok)
+
+	_, ok = normalizeExploreClip(exploreClipMeasurement{
+		Clip:          exploreClip{X: 10, Y: 10, Width: 800, Height: 400},
+		DocumentWidth: 1000, DocumentHeight: 600, Reliable: true,
+	})
+	assert.True(t, ok)
 }

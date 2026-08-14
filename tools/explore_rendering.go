@@ -11,8 +11,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -33,8 +35,12 @@ const (
 	maxExploreVariableKey   = 128
 	maxExploreVariableValue = 256
 	maxExploreModelBytes    = 32 * 1024
+	maxExploreModelFields   = 256
 	maxExploreURLLength     = 100 * 1024
+	maxExploreStringLength  = 1024
 )
+
+var browserRenderMu sync.Mutex
 
 type ExploreRenderQuery struct {
 	RefID string         `json:"refId,omitempty" jsonschema:"description=Reference ID for the query. Defaults to A\\, B\\, C and so on."`
@@ -66,9 +72,9 @@ type ExploreRenderResult struct {
 }
 
 type explorePane struct {
-	Datasource map[string]string `json:"datasource"`
-	Queries    []map[string]any  `json:"queries"`
-	Range      RenderTimeRange   `json:"range"`
+	Datasource string           `json:"datasource"`
+	Queries    []map[string]any `json:"queries"`
+	Range      RenderTimeRange  `json:"range"`
 }
 
 func renderExploreImage(ctx context.Context, args ExploreRenderParams) (ExploreRenderResult, error) {
@@ -117,6 +123,7 @@ func renderExploreImage(ctx context.Context, args ExploreRenderParams) (ExploreR
 
 	imageData, err := renderWithChromeActions(ctx, exploreURL, cookie, parsedURL.Hostname(),
 		options.width, options.height, options.scale, options.timeout,
+		runExploreQuery(),
 		waitForExploreReady(),
 		captureExploreScreenshot(options.crop),
 	)
@@ -151,11 +158,18 @@ func validateExploreRenderParams(args ExploreRenderParams) (exploreRenderOptions
 	if strings.TrimSpace(args.DatasourceUID) == "" {
 		return exploreRenderOptions{}, fmt.Errorf("datasourceUid is required")
 	}
+	if len(args.DatasourceUID) > maxExploreStringLength || strings.ContainsAny(args.DatasourceUID, "\r\n") {
+		return exploreRenderOptions{}, fmt.Errorf("datasourceUid must be at most %d bytes and contain no newlines", maxExploreStringLength)
+	}
 	if len(args.Queries) == 0 || len(args.Queries) > maxExploreQueries {
 		return exploreRenderOptions{}, fmt.Errorf("queries must contain between 1 and %d items", maxExploreQueries)
 	}
 	if args.TimeRange.From == "" || args.TimeRange.To == "" {
 		return exploreRenderOptions{}, fmt.Errorf("timeRange.from and timeRange.to are required")
+	}
+	if len(args.TimeRange.From) > maxExploreStringLength || len(args.TimeRange.To) > maxExploreStringLength ||
+		strings.ContainsAny(args.TimeRange.From+args.TimeRange.To, "\r\n") {
+		return exploreRenderOptions{}, fmt.Errorf("time range values must be at most %d bytes and contain no newlines", maxExploreStringLength)
 	}
 	if args.OutputPath == "" {
 		return exploreRenderOptions{}, fmt.Errorf("outputPath is required")
@@ -203,8 +217,13 @@ func validateExploreRenderParams(args ExploreRenderParams) (exploreRenderOptions
 		return exploreRenderOptions{}, fmt.Errorf("variables cannot contain more than %d entries", maxExploreVariables)
 	}
 	for key, value := range args.Variables {
-		if len(key) > maxExploreVariableKey || len(value) > maxExploreVariableValue {
+		if strings.TrimSpace(key) == "" || len(key) > maxExploreVariableKey || len(value) > maxExploreVariableValue ||
+			strings.ContainsAny(key+value, "\r\n") {
 			return exploreRenderOptions{}, fmt.Errorf("Explore variable keys must be at most %d bytes and values at most %d bytes", maxExploreVariableKey, maxExploreVariableValue)
+		}
+		switch key {
+		case "panes", "schemaVersion", "orgId", "theme":
+			return exploreRenderOptions{}, fmt.Errorf("Explore variable %q is reserved", key)
 		}
 	}
 	for i, query := range args.Queries {
@@ -218,6 +237,12 @@ func validateExploreRenderParams(args ExploreRenderParams) (exploreRenderOptions
 		if len(modelBytes) > maxExploreModelBytes {
 			return exploreRenderOptions{}, fmt.Errorf("queries[%d].model exceeds %d bytes", i, maxExploreModelBytes)
 		}
+		if len(query.Model) > maxExploreModelFields {
+			return exploreRenderOptions{}, fmt.Errorf("queries[%d].model contains more than %d fields", i, maxExploreModelFields)
+		}
+		if query.RefID != "" && (len(query.RefID) > 16 || strings.ContainsAny(query.RefID, "\r\n")) {
+			return exploreRenderOptions{}, fmt.Errorf("queries[%d].refId is invalid", i)
+		}
 	}
 	return exploreRenderOptions{
 		width: width, height: height, scale: scale,
@@ -230,11 +255,29 @@ func buildExploreRenderURL(baseURL string, orgID int64, datasourceType string, a
 	if strings.TrimSpace(datasourceType) == "" {
 		return "", fmt.Errorf("datasourceType is required")
 	}
+	if len(datasourceType) > maxExploreStringLength || strings.ContainsAny(datasourceType, "\r\n") {
+		return "", fmt.Errorf("datasourceType must be at most %d bytes and contain no newlines", maxExploreStringLength)
+	}
+	parsedBase, err := url.Parse(baseURL)
+	if err != nil || parsedBase.Scheme == "" || parsedBase.Host == "" {
+		return "", fmt.Errorf("base Grafana URL must be absolute")
+	}
 	queries := make([]map[string]any, 0, len(args.Queries))
 	for i, query := range args.Queries {
 		model := make(map[string]any, len(query.Model)+1)
 		for key, value := range query.Model {
 			model[key] = value
+		}
+		if _, ok := model["datasource"]; !ok {
+			model["datasource"] = map[string]string{
+				"uid":  args.DatasourceUID,
+				"type": datasourceType,
+			}
+		}
+		if _, ok := model["editorMode"]; !ok && isExpressionDatasource(datasourceType) {
+			if expression, ok := model["expr"].(string); ok && strings.TrimSpace(expression) != "" {
+				model["editorMode"] = "code"
+			}
 		}
 		refID := query.RefID
 		if refID == "" {
@@ -244,16 +287,21 @@ func buildExploreRenderURL(baseURL string, orgID int64, datasourceType string, a
 		queries = append(queries, model)
 	}
 	pane := explorePane{
-		Datasource: map[string]string{"type": datasourceType, "uid": args.DatasourceUID},
+		Datasource: args.DatasourceUID,
 		Queries:    queries,
 		Range:      args.TimeRange,
 	}
-	panesJSON, err := json.Marshal(map[string]explorePane{"0": pane})
+	panesJSON, err := json.Marshal(map[string]explorePane{"abc": pane})
 	if err != nil {
 		return "", fmt.Errorf("marshal panes: %w", err)
 	}
+	leftJSON, err := json.Marshal(pane)
+	if err != nil {
+		return "", fmt.Errorf("marshal Explore left state: %w", err)
+	}
 	params := url.Values{}
 	params.Set("panes", string(panesJSON))
+	params.Set("left", string(leftJSON))
 	params.Set("schemaVersion", "1")
 	if orgID <= 0 {
 		orgID = 1
@@ -274,9 +322,120 @@ func buildExploreRenderURL(baseURL string, orgID int64, datasourceType string, a
 	return result, nil
 }
 
+func isExpressionDatasource(datasourceType string) bool {
+	switch strings.ToLower(datasourceType) {
+	case "prometheus", "loki":
+		return true
+	default:
+		return false
+	}
+}
+
 type exploreReadyState struct {
 	Ready bool   `json:"ready"`
 	Error string `json:"error"`
+}
+
+func runExploreQuery() chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		const script = `(() => {
+			const selectors = [
+				'[data-testid*="RefreshPicker run button"]',
+				'button[aria-label="Run query"]'
+			];
+			for (const selector of selectors) {
+				const button = document.querySelector(selector);
+				if (!button) continue;
+				const rect = button.getBoundingClientRect();
+				if (rect.width <= 0 || rect.height <= 0) continue;
+				const disabled = button.disabled ||
+					button.getAttribute("aria-disabled") === "true" ||
+					button.getAttribute("data-testid")?.includes("disabled");
+				const hasQueryEditor = document.querySelector(
+					".query-editor-row, [data-testid*='query editor'], textarea, input"
+				) !== null;
+				if (!disabled && hasQueryEditor) return selector;
+			}
+			return "";
+		})()`
+		pollCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		var selector string
+		var readySince time.Time
+		for {
+			if err := chromedp.Evaluate(script, &selector).Do(ctx); err != nil {
+				return err
+			}
+			if selector != "" {
+				if readySince.IsZero() {
+					readySince = time.Now()
+				}
+				if time.Since(readySince) >= time.Second {
+					break
+				}
+			} else {
+				readySince = time.Time{}
+			}
+			select {
+			case <-pollCtx.Done():
+				return fmt.Errorf("Explore query controls did not finish initializing: %w", pollCtx.Err())
+			case <-ticker.C:
+			}
+		}
+
+		requests := make(chan string, 1)
+		chromedp.ListenTarget(ctx, func(event any) {
+			request, ok := event.(*network.EventRequestWillBeSent)
+			if !ok || !strings.Contains(request.Request.URL, "/api/ds/query") {
+				return
+			}
+			select {
+			case requests <- request.Request.URL:
+			default:
+			}
+		})
+		clickScript := fmt.Sprintf(`(() => {
+			const button = document.querySelector(%q);
+			if (!button) return false;
+			button.click();
+			return true;
+		})()`, selector)
+		var clicked bool
+		if err := chromedp.Evaluate(clickScript, &clicked).Do(ctx); err != nil {
+			return fmt.Errorf("click Explore Run query button: %w", err)
+		}
+		if !clicked {
+			return fmt.Errorf("Explore Run query button disappeared before it could be clicked")
+		}
+		requestCtx, requestCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer requestCancel()
+		select {
+		case <-requests:
+			return nil
+		case <-requestCtx.Done():
+			const diagnosticScript = `(() => {
+				const button = document.querySelector('[data-testid="RefreshPicker run button"], button[aria-label="Run query"]');
+				return {
+					path: window.location.pathname,
+					buttonText: button?.textContent?.trim() || "",
+					buttonDisabled: Boolean(button?.disabled) || button?.getAttribute("aria-disabled") === "true",
+					buttonHTML: button?.outerHTML?.slice(0, 500) || "",
+					queryEditors: document.querySelectorAll(".query-editor-row, [data-testid*='query editor']").length,
+					bodyText: document.body?.innerText?.trim().slice(0, 300) || ""
+				};
+			})()`
+			var diagnostic map[string]any
+			if err := chromedp.Evaluate(diagnosticScript, &diagnostic).Do(ctx); err == nil {
+				encoded, marshalErr := json.Marshal(diagnostic)
+				if marshalErr == nil {
+					return fmt.Errorf("Explore Run query did not emit a /api/ds/query request: %w (browser state: %s)", requestCtx.Err(), encoded)
+				}
+			}
+			return fmt.Errorf("Explore Run query did not emit a /api/ds/query request: %w", requestCtx.Err())
+		}
+	})
 }
 
 func waitForExploreReady() chromedp.Action {
@@ -288,10 +447,18 @@ func waitForExploreReady() chromedp.Action {
 				return rect.width > 0 && rect.height > 0 &&
 					getComputedStyle(element).visibility !== "hidden";
 			};
+			const firstVisible = (selector) => [...document.querySelectorAll(selector)]
+				.find((element) => visible(element));
+			const currentPath = window.location.pathname.toLowerCase();
+			if (currentPath === "/login" || currentPath.endsWith("/login") ||
+				document.body?.innerText?.toLowerCase().includes("sign in to grafana")) {
+				return {ready: false, error: "Grafana authentication is required"};
+			}
 			const errors = [
 				"[data-testid*='error']",
 				".alert-error",
-				".query-editor-row .alert"
+				".query-editor-row .alert",
+				"[role='alert']"
 			];
 			for (const selector of errors) {
 				const element = document.querySelector(selector);
@@ -304,13 +471,34 @@ func waitForExploreReady() chromedp.Action {
 				"[aria-label='Loading']",
 				"[data-testid*='loading']"
 			].some((selector) => visible(document.querySelector(selector)));
+			const noData = [
+				".no-data",
+				"[data-testid*='no-data']",
+				".panel-no-data"
+			].some((selector) => visible(document.querySelector(selector))) ||
+				[...document.querySelectorAll(".explore-container *")].some((element) =>
+					visible(element) && /^(no data|no datapoints)$/i.test(element.textContent.trim()));
 			const visualizations = [
 				".explore-container .panel-content",
+				".panel-content",
 				".explore-container [data-testid*='panel content']",
+				"[data-testid*='panel content']",
+				"[data-testid*='visualization']",
 				".explore-container canvas",
-				".explore-container svg"
+				".explore-container svg",
+				"canvas",
+				"svg"
 			];
-			const ready = !loading && visualizations.some((selector) => visible(document.querySelector(selector)));
+			if (noData) return {ready: false, error: "Explore query returned no data"};
+			const visualization = visualizations
+				.map((selector) => firstVisible(selector))
+				.find(Boolean);
+			const ready = !loading && Boolean(visualization) &&
+				(visualization.tagName !== "CANVAS" ||
+					(visualization.width > 0 && visualization.height > 0)) &&
+				(visualization.tagName === "CANVAS" ||
+					visualization.childElementCount > 0 ||
+					visualization.textContent.trim().length > 0);
 			return {ready, error: ""};
 		})()`
 		ticker := time.NewTicker(250 * time.Millisecond)
@@ -328,6 +516,20 @@ func waitForExploreReady() chromedp.Action {
 			}
 			select {
 			case <-ctx.Done():
+				const diagnosticScript = `(() => ({
+					bodyText: document.body?.innerText?.trim().slice(-500) || "",
+					panelContents: document.querySelectorAll(".panel-content").length,
+					canvases: document.querySelectorAll("canvas").length,
+					svgs: document.querySelectorAll("svg").length,
+					alerts: [...document.querySelectorAll("[role='alert'], .alert-error")].map((e) => e.textContent.trim()).filter(Boolean).slice(0, 3)
+				}))()`
+				var diagnostic map[string]any
+				if err := chromedp.Evaluate(diagnosticScript, &diagnostic).Do(ctx); err == nil {
+					encoded, marshalErr := json.Marshal(diagnostic)
+					if marshalErr == nil {
+						return fmt.Errorf("timeout waiting for Explore visualization: %w (browser state: %s)", ctx.Err(), encoded)
+					}
+				}
 				return fmt.Errorf("timeout waiting for Explore visualization: %w", ctx.Err())
 			case <-ticker.C:
 			}
@@ -342,38 +544,169 @@ type exploreClip struct {
 	Height float64 `json:"height"`
 }
 
+type exploreClipMeasurement struct {
+	Clip             exploreClip `json:"clip"`
+	DocumentWidth    float64     `json:"documentWidth"`
+	DocumentHeight   float64     `json:"documentHeight"`
+	Reliable         bool        `json:"reliable"`
+	SelectedSelector string      `json:"selectedSelector"`
+}
+
+func normalizeExploreClip(measurement exploreClipMeasurement) (exploreClip, bool) {
+	clip := measurement.Clip
+	if !measurement.Reliable || measurement.DocumentWidth <= 0 || measurement.DocumentHeight <= 0 {
+		return exploreClip{}, false
+	}
+	if clip.Width <= 0 || clip.Height <= 0 {
+		return exploreClip{}, false
+	}
+	clip.X = maxFloat(0, minFloat(clip.X, measurement.DocumentWidth))
+	clip.Y = maxFloat(0, minFloat(clip.Y, measurement.DocumentHeight))
+	clip.Width = minFloat(clip.Width, measurement.DocumentWidth-clip.X)
+	clip.Height = minFloat(clip.Height, measurement.DocumentHeight-clip.Y)
+	if clip.Width <= 0 || clip.Height <= 0 {
+		return exploreClip{}, false
+	}
+	return clip, true
+}
+
+func minFloat(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxFloat(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func captureExploreScreenshot(crop string) chromedp.Action {
 	return chromedp.ActionFunc(func(ctx context.Context) error {
 		var clip exploreClip
 		if crop == "exploreVisualization" {
 			const script = `(() => {
-				const selectors = [
-					".explore-container .panel-content",
-					".explore-container [data-testid*='panel content']",
-					".explore-container canvas",
-					".explore-container svg"
-				];
-				for (const selector of selectors) {
-					const element = document.querySelector(selector);
-					if (!element) continue;
+				const visible = (element) => {
+					if (!element) return false;
 					const rect = element.getBoundingClientRect();
-					if (rect.width > 0 && rect.height > 0) {
-						return {x: rect.x, y: rect.y, width: rect.width, height: rect.height};
+					const style = getComputedStyle(element);
+					return rect.width > 0 && rect.height > 0 &&
+						style.display !== "none" && style.visibility !== "hidden";
+				};
+				const hasVisualization = (element) =>
+					!!element?.querySelector("canvas, svg, [role='img'], [data-testid*='visualization']");
+				const containsRenderedVisual = (element) => {
+					const elementRect = element.getBoundingClientRect();
+					const visual = [...element.querySelectorAll("canvas, svg, [role='img']")]
+						.filter(visible);
+					if (visual.length === 0) return false;
+					const bounds = visual.reduce((result, child) => {
+						const rect = child.getBoundingClientRect();
+						return {
+							left: Math.min(result.left, rect.left),
+							top: Math.min(result.top, rect.top),
+							right: Math.max(result.right, rect.right),
+							bottom: Math.max(result.bottom, rect.bottom)
+						};
+					}, {left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity});
+					// Reject a panel-content wrapper that clips an overflowing
+					// canvas. Its ancestor may contain the axes/labels and is
+					// the only safe element crop candidate.
+					return elementRect.left <= bounds.left + 1 &&
+						elementRect.top <= bounds.top + 1 &&
+						elementRect.right >= bounds.right - 1 &&
+						elementRect.bottom >= bounds.bottom - 1;
+				};
+				const candidates = [
+					"[data-testid*='panel content']",
+					".explore-container .panel-content",
+					".panel-content",
+					"[data-testid*='visualization']"
+				];
+				let selected = null;
+				let selectedSelector = "";
+				for (const selector of candidates) {
+					const element = [...document.querySelectorAll(selector)]
+						.find((candidate) => visible(candidate) && hasVisualization(candidate) &&
+							containsRenderedVisual(candidate));
+					if (element) {
+						selected = element;
+						selectedSelector = selector;
+						break;
 					}
 				}
-				return {x: 0, y: 0, width: 0, height: 0};
+				// Some Grafana versions do not put a stable class on the panel
+				// content. Walk from the rendered visual to the nearest useful
+				// ancestor, while deliberately excluding the whole Explore shell.
+				if (!selected) {
+					const visual = [...document.querySelectorAll("canvas, svg, [role='img']")]
+						.find((candidate) => visible(candidate));
+					for (let element = visual?.parentElement; element && element !== document.body;
+						element = element.parentElement) {
+						if (element.classList.contains("explore-container")) continue;
+						if (visible(element) && hasVisualization(element) &&
+							containsRenderedVisual(element)) {
+							selected = element;
+							selectedSelector = "visualization ancestor";
+							break;
+						}
+					}
+				}
+				if (!selected) {
+					return {
+						reliable: false,
+						clip: {x: 0, y: 0, width: 0, height: 0},
+						documentWidth: 0, documentHeight: 0, selectedSelector: ""
+					};
+				}
+				selected.scrollIntoView({block: "center", inline: "nearest"});
+				const rect = selected.getBoundingClientRect();
+				const documentWidth = Math.max(
+					document.documentElement.scrollWidth, document.body?.scrollWidth || 0,
+					window.innerWidth);
+				const documentHeight = Math.max(
+					document.documentElement.scrollHeight, document.body?.scrollHeight || 0,
+					window.innerHeight);
+				const x = rect.left + window.scrollX;
+				const y = rect.top + window.scrollY;
+				const reliable = Number.isFinite(x) && Number.isFinite(y) &&
+					Number.isFinite(rect.width) && Number.isFinite(rect.height) &&
+					rect.width >= 100 && rect.height >= 50 &&
+					rect.width <= documentWidth && rect.height <= documentHeight;
+				return {
+					reliable,
+					clip: {x, y, width: rect.width, height: rect.height},
+					documentWidth, documentHeight, selectedSelector
+				};
 			})()`
-			if err := chromedp.Evaluate(script, &clip).Do(ctx); err != nil {
+			var measurement exploreClipMeasurement
+			if err := chromedp.Evaluate(script, &measurement).Do(ctx); err != nil {
 				return err
 			}
+			// scrollIntoView can trigger a final layout pass. Re-read after two
+			// frames so the clip matches the layout used by captureScreenshot.
+			if err := chromedp.Sleep(100 * time.Millisecond).Do(ctx); err != nil {
+				return err
+			}
+			// Recompute after the layout settle, because the first
+			// getBoundingClientRect() may have been invalidated by scrolling.
+			if err := chromedp.Evaluate(script, &measurement).Do(ctx); err != nil {
+				return err
+			}
+			clip, _ = normalizeExploreClip(measurement)
 			if clip.Width <= 0 || clip.Height <= 0 {
-				return fmt.Errorf("Explore visualization element was not found")
+				// A clipped canvas is worse than a complete viewport image. Keep
+				// the default mode safe when Grafana's DOM changes.
+				crop = "viewport"
 			}
 		}
 		var image []byte
 		capture := page.CaptureScreenshot().
 			WithFormat(page.CaptureScreenshotFormatPng).
-			WithCaptureBeyondViewport(false)
+			WithCaptureBeyondViewport(crop == "exploreVisualization")
 		if crop == "exploreVisualization" {
 			capture = capture.WithClip(&page.Viewport{
 				X: clip.X, Y: clip.Y, Width: clip.Width, Height: clip.Height, Scale: 1,

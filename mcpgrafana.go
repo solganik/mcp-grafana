@@ -1230,8 +1230,10 @@ func NewGrafanaClient(ctx context.Context, grafanaURL, apiKey string, auth *url.
 					// transport-level injection since the OpenAPI client
 					// doesn't support them natively.
 					oboConfig := GrafanaConfig{
+						URL:          config.URL,
 						AccessToken:  config.AccessToken,
 						IDToken:      config.IDToken,
+						BrowserAuth:  config.BrowserAuth,
 						OrgID:        config.OrgID,
 						TLSConfig:    config.TLSConfig,
 						ExtraHeaders: config.ExtraHeaders,
@@ -1260,6 +1262,7 @@ func NewGrafanaClient(ctx context.Context, grafanaURL, apiKey string, auth *url.
 		BasicAuth:    auth,
 		AccessToken:  config.AccessToken,
 		IDToken:      config.IDToken,
+		BrowserAuth:  config.BrowserAuth,
 		TLSConfig:    config.TLSConfig,
 		ExtraHeaders: config.ExtraHeaders,
 		Logger:       config.Logger,
